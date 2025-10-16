@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>纯 HTML 摄像头扫码（jsQR）</title>
+  <style>
+    body { font-family: Arial, "PingFang SC", "Microsoft Yahei"; padding: 18px; background:#fafafa; }
+    #container { max-width:720px; margin:0 auto; text-align:center; }
+    video { width:100%; max-height:60vh; background:#000; border-radius:8px; }
+    canvas { display:none; } /* 用作帧捕获 */
+    #result { margin-top:12px; padding:10px; border-radius:6px; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,0.08); word-break:break-all;}
+    .row { display:flex; gap:8px; justify-content:center; margin-top:10px; }
+    button { padding:8px 12px; border-radius:6px; border:1px solid #ddd; background:#fff; cursor:pointer; }
+    button:active { transform:translateY(1px); }
+    small { color:#666; display:block; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <h2>摄像头扫码（纯 HTML + JS）</h2>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <div class="row">
+      <button id="startBtn">开始扫描</button>
+      <button id="stopBtn" disabled>停止</button>
+      <button id="toggleTorchBtn" disabled>切换手电（若支持）</button>
+    </div>
+
+    <div id="result">扫描结果会显示在这里</div>
+    <small>提示：请在 HTTPS / localhost 下运行；使用手机请允许“使用摄像头”，优先选择后置相机。</small>
+  </div>
+
+  <!-- 引入 jsQR（轻量级二维码解码库） -->
+  <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const resultEl = document.getElementById('result');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const toggleTorchBtn = document.getElementById('toggleTorchBtn');
+
+    let stream = null;
+    let scanning = false;
+    let scanRaf = null;
+    let track = null;
+    let torchOn = false;
+
+    async function startScan() {
+      resultEl.textContent = '启动摄像头中……';
+      // 请求后置摄像头（environment），若不可用会降级
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        });
+      } catch (err) {
+        resultEl.textContent = '打开摄像头失败：' + err.message;
+        return;
+      }
+
+      video.srcObject = stream;
+      track = stream.getVideoTracks()[0];
+
+      // 检查是否支持手电（torch）
+      const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+      const torchSupported = !!capabilities.torch;
+      toggleTorchBtn.disabled = !torchSupported;
+      toggleTorchBtn.textContent = torchSupported ? '切换手电（若支持）' : '手电 不支持';
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      scanning = true;
+
+      // 等待 video 元数据加载完成，确定宽高
+      await new Promise(resolve => {
+        if (video.readyState >= 2) return resolve();
+        video.onloadedmetadata = () => resolve();
+      });
+
+      // 设置 canvas 大小与 video 一致（尺度可调）
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      // 开始循环读取帧并识别
+      scanLoop();
+    }
+
+    function stopScan() {
+      scanning = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      toggleTorchBtn.disabled = true;
+      if (scanRaf) cancelAnimationFrame(scanRaf);
+      if (track) {
+        try { track.stop(); } catch(e){}
+        track = null;
+      }
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+      resultEl.textContent = '已停止扫描';
+    }
+
+    function scanLoop() {
+      if (!scanning) return;
+      scanRaf = requestAnimationFrame(scanLoop);
+
+      // 将当前 video 帧绘制到 canvas
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      } catch(e) {
+        // drawImage 可能在刚开始时抛错，忽略
+        return;
+      }
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // 调用 jsQR 解码
+      const code = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: "attemptBoth", // 尝试反色
+      });
+
+      if (code) {
+        // 找到二维码
+        drawBoundingBox(code.location);
+        resultEl.innerHTML = '<strong>识别成功：</strong>' + escapeHtml(code.data);
+        // 你可以在这里做进一步处理（比如停止扫描或继续）
+        // 如果要停止扫描，取消下行注释：
+        // stopScan();
+      } else {
+        // 没识别到
+        resultEl.textContent = '未识别到二维码，请将摄像头对准二维码。';
+      }
+    }
+
+    function drawBoundingBox(location) {
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "red";
+      ctx.beginPath();
+      ctx.moveTo(location.topLeftCorner.x, location.topLeftCorner.y);
+      ctx.lineTo(location.topRightCorner.x, location.topRightCorner.y);
+      ctx.lineTo(location.bottomRightCorner.x, location.bottomRightCorner.y);
+      ctx.lineTo(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // 简单的防 XSS 转义显示
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // 切换手电（如果支持）
+    async function toggleTorch() {
+      if (!track) return;
+      const cap = track.getCapabilities ? track.getCapabilities() : {};
+      if (!cap.torch) {
+        alert('当前设备/浏览器不支持 torch');
+        return;
+      }
+      torchOn = !torchOn;
+      try {
+        await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+        toggleTorchBtn.textContent = torchOn ? '关闭手电' : '打开手电';
+      } catch (e) {
+        console.warn('切换手电失败', e);
+      }
+    }
+
+    startBtn.addEventListener('click', startScan);
+    stopBtn.addEventListener('click', stopScan);
+    toggleTorchBtn.addEventListener('click', toggleTorch);
+
+    // 页面切换时释放摄像头
+    window.addEventListener('beforeunload', () => {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+    });
+  </script>
+</body>
+</html>
